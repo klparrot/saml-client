@@ -11,6 +11,7 @@ import org.opensaml.core.xml.io.Marshaller;
 import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
 import org.opensaml.saml.common.SAMLVersion;
+import org.opensaml.saml.common.xml.SAMLConstants;
 import org.opensaml.saml.metadata.resolver.impl.DOMMetadataResolver;
 import org.opensaml.saml.saml2.core.Assertion;
 import org.opensaml.saml.saml2.core.AuthnRequest;
@@ -226,8 +227,7 @@ public class SamlClient {
 
     request.setVersion(SAMLVersion.VERSION_20);
     request.setIssueInstant(DateTime.now());
-    request.setProtocolBinding(
-        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-" + this.samlBinding.toString());
+    request.setProtocolBinding(SAMLConstants.SAML2_POST_BINDING_URI);
     request.setAssertionConsumerServiceURL(assertionConsumerServiceUrl);
 
     Issuer issuer = (Issuer) buildSamlObject(Issuer.DEFAULT_ELEMENT_NAME);
@@ -600,7 +600,7 @@ public class SamlClient {
                 -> x.getBinding()
                     .equals("urn:oasis:names:tc:SAML:2.0:bindings:HTTP-" + samlBinding.toString()))
         .findAny()
-        .orElseThrow(() -> new SamlException("Cannot find HTTP-POST SSO binding in metadata"));
+        .orElseThrow(() -> new SamlException("Cannot find HTTP-" + samlBinding + " SSO binding in metadata"));
   }
 
   private static List<X509Certificate> getCertificates(IDPSSODescriptor idpSsoDescriptor)
