@@ -2,14 +2,14 @@ package com.coveo.saml;
 
 import com.sun.org.apache.xerces.internal.parsers.DOMParser;
 
-import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.codec.binary.Base64OutputStream;
 import org.joda.time.DateTime;
 import org.opensaml.core.config.InitializationService;
 import org.opensaml.core.xml.XMLObject;
 import org.opensaml.core.xml.config.XMLObjectProviderRegistrySupport;
-import org.opensaml.core.xml.io.Marshaller;
 import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
+import org.opensaml.core.xml.util.XMLObjectSupport;
 import org.opensaml.saml.common.SAMLVersion;
 import org.opensaml.saml.common.xml.SAMLConstants;
 import org.opensaml.saml.metadata.resolver.impl.DOMMetadataResolver;
@@ -33,15 +33,14 @@ import org.opensaml.xmlsec.signature.support.SignatureException;
 import org.opensaml.xmlsec.signature.support.SignatureValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Element;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.Reader;
 import java.io.StringReader;
-import java.io.StringWriter;
-import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
@@ -53,6 +52,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -238,19 +239,21 @@ public class SamlClient {
     nameIDPolicy.setFormat("urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified");
     request.setNameIDPolicy(nameIDPolicy);
 
-    StringWriter stringWriter = new StringWriter();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    OutputStream os = new Base64OutputStream(baos, true, 0, null);
+    if (samlBinding == SamlIdpBinding.Redirect) {
+      os = new DeflaterOutputStream(os, new Deflater(Deflater.BEST_COMPRESSION, true));
+    }
     try {
-      Marshaller marshaller =
-          XMLObjectProviderRegistrySupport.getMarshallerFactory().getMarshaller(request);
-      Element dom = marshaller.marshall(request);
-      XMLHelper.writeNode(dom, stringWriter);
+      XMLObjectSupport.marshallToOutputStream(request, os);
     } catch (MarshallingException ex) {
       throw new SamlException("Error while marshalling SAML request to XML", ex);
     }
-
-    logger.trace("Issuing SAML request: " + stringWriter.toString());
-
-    return Base64.encodeBase64String(stringWriter.toString().getBytes(StandardCharsets.UTF_8));
+    os.close();
+    if (logger.isTraceEnabled()) {
+      logger.trace("Issuing SAML request: " + baos.toString(StandardCharsets.UTF_8));
+    }
+    return baos.toString(StandardCharsets.UTF_8);
   }
 
   /**
