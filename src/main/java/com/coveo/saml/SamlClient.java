@@ -79,6 +79,7 @@ public class SamlClient {
   private DateTime now; // used for testing only
   private long notBeforeSkew = 0L;
   private SamlIdpBinding samlBinding;
+  private String nameIDFormat;
 
   /**
    * Returns the url where SAML requests should be posted.
@@ -124,6 +125,11 @@ public class SamlClient {
    * @param certificates                the list of base-64 encoded certificates to use to validate
    *                                    responses.
    * @param samlBinding                 what type of SAML binding should the client use.
+   * @param nameIDFormat                URI of the desired format of the name identifier for the IdP
+   *                                    to return. See [SAMLCore] §8.3 for values, also available as
+   *                                    constants under {@link org.opensaml.saml.saml2.NameIDType}.
+   *                                    If {@code null}, no specific name format will be requested.
+   * @see <a href="http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf">[SAMLCore]</a>
    * @throws SamlException thrown if any error occur while loading the provider information.
    */
   public SamlClient(
@@ -132,7 +138,8 @@ public class SamlClient {
       String identityProviderUrl,
       String responseIssuer,
       List<X509Certificate> certificates,
-      SamlIdpBinding samlBinding)
+      SamlIdpBinding samlBinding,
+      String nameIDFormat)
       throws SamlException {
 
     ensureOpenSamlIsInitialized();
@@ -156,6 +163,39 @@ public class SamlClient {
     this.responseIssuer = responseIssuer;
     credentials = certificates.stream().map(SamlClient::getCredential).collect(Collectors.toList());
     this.samlBinding = samlBinding;
+    this.nameIDFormat = nameIDFormat;
+  }
+
+  /**
+   * Constructs an SAML client using explicit parameters.
+   *
+   * @param relyingPartyIdentifier      the identifier of the relying party.
+   * @param assertionConsumerServiceUrl the url where the identity provider will post back the
+   *                                    SAML response.
+   * @param identityProviderUrl         the url where the SAML request will be submitted.
+   * @param responseIssuer              the expected issuer ID for SAML responses.
+   * @param certificates                the list of base-64 encoded certificates to use to validate
+   *                                    responses.
+   * @param samlBinding                 what type of SAML binding should the client use.
+   * @throws SamlException thrown if any error occur while loading the provider information.
+   */
+  public SamlClient(
+      String relyingPartyIdentifier,
+      String assertionConsumerServiceUrl,
+      String identityProviderUrl,
+      String responseIssuer,
+      List<X509Certificate> certificates,
+      SamlIdpBinding samlBinding)
+      throws SamlException {
+
+    this(
+        relyingPartyIdentifier,
+        assertionConsumerServiceUrl,
+        identityProviderUrl,
+        responseIssuer,
+        certificates,
+        SamlIdpBinding.POST,
+        null);
   }
 
   /**
@@ -235,9 +275,11 @@ public class SamlClient {
     issuer.setValue(relyingPartyIdentifier);
     request.setIssuer(issuer);
 
-    NameIDPolicy nameIDPolicy = (NameIDPolicy) buildSamlObject(NameIDPolicy.DEFAULT_ELEMENT_NAME);
-    nameIDPolicy.setFormat("urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified");
-    request.setNameIDPolicy(nameIDPolicy);
+    if (nameIDFormat != null) {
+      NameIDPolicy nameIDPolicy = (NameIDPolicy) buildSamlObject(NameIDPolicy.DEFAULT_ELEMENT_NAME);
+      nameIDPolicy.setFormat(nameIDFormat);
+      request.setNameIDPolicy(nameIDPolicy);
+    }
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     OutputStream os = new Base64OutputStream(baos, true, 0, null);
@@ -385,6 +427,37 @@ public class SamlClient {
       SamlIdpBinding samlBinding,
       List<X509Certificate> certificates)
       throws SamlException {
+    return fromMetadata(
+        relyingPartyIdentifier, assertionConsumerServiceUrl, metadata, samlBinding, certificates, null);
+  }
+
+  /**
+   * Constructs an SAML client using XML metadata obtained from the identity provider. <p> When
+   * using Okta as an identity provider, it is possible to pass null to relyingPartyIdentifier and
+   * assertionConsumerServiceUrl; they will be inferred from the metadata provider XML.
+   *
+   * @param relyingPartyIdentifier      the identifier for the relying party.
+   * @param assertionConsumerServiceUrl the url where the identity provider will post back the
+   *                                    SAML response.
+   * @param metadata                    the XML metadata obtained from the identity provider.
+   * @param samlBinding                 the HTTP method to use for binding to the IdP.
+   * @param certificates                list of certificates.
+   * @param nameIDFormat                URI of the desired format of the name identifier for the IdP
+   *                                    to return. See [SAMLCore] §8.3 for values, also available as
+   *                                    constants under {@link org.opensaml.saml.saml2.NameIDType}.
+   *                                    If {@code null}, no specific name format will be requested.
+   * @see <a href="http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf">[SAMLCore]</a>
+   * @return The created {@link SamlClient}.
+   * @throws SamlException thrown if any error occur while loading the metadata information.
+   */
+  public static SamlClient fromMetadata(
+      String relyingPartyIdentifier,
+      String assertionConsumerServiceUrl,
+      Reader metadata,
+      SamlIdpBinding samlBinding,
+      List<X509Certificate> certificates,
+      String nameIDFormat)
+      throws SamlException {
 
     ensureOpenSamlIsInitialized();
 
@@ -439,7 +512,8 @@ public class SamlClient {
         identityProviderUrl,
         responseIssuer,
         x509Certificates,
-        samlBinding);
+        samlBinding,
+        nameIDFormat);
   }
 
   private void validateResponse(Response response) throws SamlException {
