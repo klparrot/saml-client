@@ -2,15 +2,16 @@ package com.coveo.saml;
 
 import com.sun.org.apache.xerces.internal.parsers.DOMParser;
 
-import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.codec.binary.Base64OutputStream;
 import org.joda.time.DateTime;
 import org.opensaml.core.config.InitializationService;
 import org.opensaml.core.xml.XMLObject;
 import org.opensaml.core.xml.config.XMLObjectProviderRegistrySupport;
-import org.opensaml.core.xml.io.Marshaller;
 import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
+import org.opensaml.core.xml.util.XMLObjectSupport;
 import org.opensaml.saml.common.SAMLVersion;
+import org.opensaml.saml.common.xml.SAMLConstants;
 import org.opensaml.saml.metadata.resolver.impl.DOMMetadataResolver;
 import org.opensaml.saml.saml2.core.Assertion;
 import org.opensaml.saml.saml2.core.AuthnRequest;
@@ -32,15 +33,14 @@ import org.opensaml.xmlsec.signature.support.SignatureException;
 import org.opensaml.xmlsec.signature.support.SignatureValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Element;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.Reader;
 import java.io.StringReader;
-import java.io.StringWriter;
-import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
@@ -52,6 +52,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -77,6 +79,7 @@ public class SamlClient {
   private DateTime now; // used for testing only
   private long notBeforeSkew = 0L;
   private SamlIdpBinding samlBinding;
+  private String nameIDFormat;
 
   /**
    * Returns the url where SAML requests should be posted.
@@ -122,6 +125,11 @@ public class SamlClient {
    * @param certificates                the list of base-64 encoded certificates to use to validate
    *                                    responses.
    * @param samlBinding                 what type of SAML binding should the client use.
+   * @param nameIDFormat                URI of the desired format of the name identifier for the IdP
+   *                                    to return. See [SAMLCore] §8.3 for values, also available as
+   *                                    constants under {@link org.opensaml.saml.saml2.NameIDType}.
+   *                                    If {@code null}, no specific name format will be requested.
+   * @see <a href="http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf">[SAMLCore]</a>
    * @throws SamlException thrown if any error occur while loading the provider information.
    */
   public SamlClient(
@@ -130,7 +138,8 @@ public class SamlClient {
       String identityProviderUrl,
       String responseIssuer,
       List<X509Certificate> certificates,
-      SamlIdpBinding samlBinding)
+      SamlIdpBinding samlBinding,
+      String nameIDFormat)
       throws SamlException {
 
     ensureOpenSamlIsInitialized();
@@ -154,6 +163,39 @@ public class SamlClient {
     this.responseIssuer = responseIssuer;
     credentials = certificates.stream().map(SamlClient::getCredential).collect(Collectors.toList());
     this.samlBinding = samlBinding;
+    this.nameIDFormat = nameIDFormat;
+  }
+
+  /**
+   * Constructs an SAML client using explicit parameters.
+   *
+   * @param relyingPartyIdentifier      the identifier of the relying party.
+   * @param assertionConsumerServiceUrl the url where the identity provider will post back the
+   *                                    SAML response.
+   * @param identityProviderUrl         the url where the SAML request will be submitted.
+   * @param responseIssuer              the expected issuer ID for SAML responses.
+   * @param certificates                the list of base-64 encoded certificates to use to validate
+   *                                    responses.
+   * @param samlBinding                 what type of SAML binding should the client use.
+   * @throws SamlException thrown if any error occur while loading the provider information.
+   */
+  public SamlClient(
+      String relyingPartyIdentifier,
+      String assertionConsumerServiceUrl,
+      String identityProviderUrl,
+      String responseIssuer,
+      List<X509Certificate> certificates,
+      SamlIdpBinding samlBinding)
+      throws SamlException {
+
+    this(
+        relyingPartyIdentifier,
+        assertionConsumerServiceUrl,
+        identityProviderUrl,
+        responseIssuer,
+        certificates,
+        SamlIdpBinding.POST,
+        null);
   }
 
   /**
@@ -226,31 +268,34 @@ public class SamlClient {
 
     request.setVersion(SAMLVersion.VERSION_20);
     request.setIssueInstant(DateTime.now());
-    request.setProtocolBinding(
-        "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-" + this.samlBinding.toString());
+    request.setProtocolBinding(SAMLConstants.SAML2_POST_BINDING_URI);
     request.setAssertionConsumerServiceURL(assertionConsumerServiceUrl);
 
     Issuer issuer = (Issuer) buildSamlObject(Issuer.DEFAULT_ELEMENT_NAME);
     issuer.setValue(relyingPartyIdentifier);
     request.setIssuer(issuer);
 
-    NameIDPolicy nameIDPolicy = (NameIDPolicy) buildSamlObject(NameIDPolicy.DEFAULT_ELEMENT_NAME);
-    nameIDPolicy.setFormat("urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified");
-    request.setNameIDPolicy(nameIDPolicy);
+    if (nameIDFormat != null) {
+      NameIDPolicy nameIDPolicy = (NameIDPolicy) buildSamlObject(NameIDPolicy.DEFAULT_ELEMENT_NAME);
+      nameIDPolicy.setFormat(nameIDFormat);
+      request.setNameIDPolicy(nameIDPolicy);
+    }
 
-    StringWriter stringWriter = new StringWriter();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    OutputStream os = new Base64OutputStream(baos, true, 0, null);
+    if (samlBinding == SamlIdpBinding.Redirect) {
+      os = new DeflaterOutputStream(os, new Deflater(Deflater.BEST_COMPRESSION, true));
+    }
     try {
-      Marshaller marshaller =
-          XMLObjectProviderRegistrySupport.getMarshallerFactory().getMarshaller(request);
-      Element dom = marshaller.marshall(request);
-      XMLHelper.writeNode(dom, stringWriter);
+      XMLObjectSupport.marshallToOutputStream(request, os);
     } catch (MarshallingException ex) {
       throw new SamlException("Error while marshalling SAML request to XML", ex);
     }
-
-    logger.trace("Issuing SAML request: " + stringWriter.toString());
-
-    return Base64.encodeBase64String(stringWriter.toString().getBytes(StandardCharsets.UTF_8));
+    os.close();
+    if (logger.isTraceEnabled()) {
+      logger.trace("Issuing SAML request: " + baos.toString(StandardCharsets.UTF_8));
+    }
+    return baos.toString(StandardCharsets.UTF_8);
   }
 
   /**
@@ -382,6 +427,37 @@ public class SamlClient {
       SamlIdpBinding samlBinding,
       List<X509Certificate> certificates)
       throws SamlException {
+    return fromMetadata(
+        relyingPartyIdentifier, assertionConsumerServiceUrl, metadata, samlBinding, certificates, null);
+  }
+
+  /**
+   * Constructs an SAML client using XML metadata obtained from the identity provider. <p> When
+   * using Okta as an identity provider, it is possible to pass null to relyingPartyIdentifier and
+   * assertionConsumerServiceUrl; they will be inferred from the metadata provider XML.
+   *
+   * @param relyingPartyIdentifier      the identifier for the relying party.
+   * @param assertionConsumerServiceUrl the url where the identity provider will post back the
+   *                                    SAML response.
+   * @param metadata                    the XML metadata obtained from the identity provider.
+   * @param samlBinding                 the HTTP method to use for binding to the IdP.
+   * @param certificates                list of certificates.
+   * @param nameIDFormat                URI of the desired format of the name identifier for the IdP
+   *                                    to return. See [SAMLCore] §8.3 for values, also available as
+   *                                    constants under {@link org.opensaml.saml.saml2.NameIDType}.
+   *                                    If {@code null}, no specific name format will be requested.
+   * @see <a href="http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf">[SAMLCore]</a>
+   * @return The created {@link SamlClient}.
+   * @throws SamlException thrown if any error occur while loading the metadata information.
+   */
+  public static SamlClient fromMetadata(
+      String relyingPartyIdentifier,
+      String assertionConsumerServiceUrl,
+      Reader metadata,
+      SamlIdpBinding samlBinding,
+      List<X509Certificate> certificates,
+      String nameIDFormat)
+      throws SamlException {
 
     ensureOpenSamlIsInitialized();
 
@@ -436,7 +512,8 @@ public class SamlClient {
         identityProviderUrl,
         responseIssuer,
         x509Certificates,
-        samlBinding);
+        samlBinding,
+        nameIDFormat);
   }
 
   private void validateResponse(Response response) throws SamlException {
@@ -600,7 +677,7 @@ public class SamlClient {
                 -> x.getBinding()
                     .equals("urn:oasis:names:tc:SAML:2.0:bindings:HTTP-" + samlBinding.toString()))
         .findAny()
-        .orElseThrow(() -> new SamlException("Cannot find HTTP-POST SSO binding in metadata"));
+        .orElseThrow(() -> new SamlException("Cannot find HTTP-" + samlBinding + " SSO binding in metadata"));
   }
 
   private static List<X509Certificate> getCertificates(IDPSSODescriptor idpSsoDescriptor)
